@@ -1,48 +1,60 @@
-import scala.util.{Random, Try}
-import zio.{App, Task, RIO, ZIO}
+import scala.util.Try
+import zio._
 import zio.console._
+import net.ruippeixotog.scalascraper.browser.JsoupBrowser
+import net.ruippeixotog.scalascraper.dsl.DSL.Extract._
+import net.ruippeixotog.scalascraper.dsl.DSL.Parse._
+import net.ruippeixotog.scalascraper.dsl.DSL._
+import net.ruippeixotog.scalascraper.model._
 
 object Main extends App {
-  def run(args: List[String]) = guessLogic.fold(_ => 1, _ => 0)
+  def run(args: List[String]) = scraperLogic.fold(_ => 1, _ => 0)
 
-  def guessLogic: RIO[Console, Unit] =
+  val domain = "https://zio.dev"
+  
+  val startPageUrl = s"${domain}/docs/overview/overview_index"
+
+  val browser = JsoupBrowser()
+
+  case class Topic(val name: String, val url: String)
+  
+  case class Subtopic(val name: String) {
+    override def toString = s"- ${name}"
+  }
+  
+  case class Section(val name: String, val subtopics: List[Subtopic]) {
+    override def toString = s"# ${name}"
+  }
+
+  def scraperLogic: RIO[Console, Unit] =
     for {
-      _    <- putStrLn("Hello! What is your name?")
-      name <- getStrLn
-      _    <- putStrLn(s"Hello, ${name}, welcome to the game!")
-      _    <- gameLoop(name)
+      topics   <- fetchTopics(startPageUrl)
+      sections <- fetchSections(topics)
+      _        <- printSections(sections)
     } yield ()
 
-  def gameLoop(name: String): RIO[Console, Unit] =
+  def fetchTopics(url: String): Task[List[Topic]] =
     for {
-      num   <- nextInt(5).map(_ + 1)
-      _     <- putStrLn(s"Dear ${name}, please guess a number from 1 to 5:")
-      input <- getStrLn
-      _     <- printResults(input, num, name)
-      cont  <- checkContinue(input)
-      _     <- if (cont) gameLoop(name) else Task.succeed(())
-    } yield ()
-
-  def parseInt(s: String): Option[Int] = Try(s.toInt).toOption
-
-  def nextInt(upper: Int): Task[Int] = ZIO.effect(Random.nextInt(upper))
-
-  def printResults(input: String, num: Int, name: String) =
-    parseInt(input).fold(
-      putStrLn("You did not enter a number")
-    )(guess =>
-      if (guess == num) putStrLn("You guessed right, " + name + "!")
-      else putStrLn("You guessed wrong, " + name + "! The number was: " + num)
+      doc    <- ZIO.fromTry(Try(browser.get(url)))
+      topics <- Task.succeed(
+        (doc >> elementList("#docsNav a")).map(e => Topic(e.text, s"${domain}${e.attr("href")}"))
+      )
+    } yield topics
+  
+  def fetchSections(topics: List[Topic]): Task[List[Section]] =
+    ZIO.foreach(topics)(topic =>
+      for {
+        doc       <- ZIO.fromTry(Try(browser.get(topic.url)))
+        texts     <- Task.succeed(doc >> texts(".toc-headings a"))
+        subtopics <- Task.succeed(texts.map(Subtopic(_)).toList)
+      } yield Section(topic.name, subtopics)
     )
-
-  def checkContinue(name: String): RIO[Console, Boolean] =
-    for {
-      _     <- putStrLn(s"Do you want to continue, ${name}?")
-      input <- getStrLn.map(_.toLowerCase)
-      cont  <- input match {
-                 case "y" => Task.succeed(true)
-                 case "n" => Task.succeed(false)
-                 case _   => checkContinue(input)
-               }
-    } yield cont
+  
+  def printSections(sections: List[Section]): URIO[Console, List[Unit]] =
+    ZIO.foreach(sections)(section =>
+      for {
+        _ <- putStrLn(section.toString)
+        _ <- ZIO.foreach(section.subtopics)(s => putStrLn(s.toString))
+      } yield ()
+    )
 }
